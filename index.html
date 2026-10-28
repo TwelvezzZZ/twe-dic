@@ -204,7 +204,14 @@ textarea{background:var(--card);color:var(--ink);font-family:inherit}
 @media (prefers-reduced-motion:reduce){.loader-spin{animation:none}}
 /* ---------- 错词表导出：A4 预览画布（永远白纸黑字，和打印一致） ---------- */
 .a4wrap{margin:12px 0;padding:10px;background:var(--paper);border:1px dashed var(--line-strong);border-radius:8px}
-.a4{background:#fff;color:#1a2a44;aspect-ratio:210/297;overflow:hidden;border-radius:2px;box-shadow:0 2px 10px rgba(20,40,80,.18);padding:4% 4.5%;font-size:10px;line-height:1.4}
+.a4tool{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+.a4tool button{padding:8px 14px;border-radius:999px;border:1px solid var(--line-strong);background:#fff;color:var(--ink);font-size:14px;cursor:pointer;min-height:38px}
+.a4tool button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.a4info{font-size:13px;color:var(--ink-2)}
+.a4scroll{overflow:auto;-webkit-overflow-scrolling:touch;background:#e8edf5;padding:10px;border-radius:6px}
+.a4pages{transform-origin:top left;width:794px}
+.a4page{background:#fff;color:#1a2a44;width:794px;padding:26px 30px;box-shadow:0 2px 10px rgba(20,40,80,.18);margin:0 auto 14px;box-sizing:content-box;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif}
+.a4page:last-child{margin-bottom:0}
 .a4 .pv-title{font-weight:700;font-size:12.5px;margin-bottom:1px}
 .a4 .pv-sub{color:#7d90ab;font-size:8.5px;margin-bottom:6px}
 .a4 .pv-c{margin-bottom:3px;overflow-wrap:break-word}
@@ -431,7 +438,7 @@ button:active{filter:brightness(.95)}
 <button data-layout="single" class="on" type="button">单列型</button>
 <button data-layout="double" type="button">双列型</button>
 </div>
-<div class="a4wrap"><div class="a4" id="exportPreview"></div></div>
+<div class="a4wrap"><div class="a4tool"><button type="button" id="btnPvFit" class="on">整页</button><button type="button" id="btnPvZoom">放大阅读</button><span class="a4info" id="pvInfo"></span></div><div class="a4scroll" id="pvScroll"><div id="exportPreview" class="a4pages"></div></div><p class="small" style="margin:8px 0 0">整页是缩小看全貌，点放大阅读按真实大小看，左右上下都能滑；分页和导出文件用同一套排版，一页里的词和导出文件里那一页的词是一样的。</p></div>
 <div><button class="btn dark" id="btnExportPdf" type="button">导出 PDF</button><button class="btn" id="btnExportDocx" type="button">导出 DOCX</button></div>
 <p class="small" style="margin:8px 0 0">PDF 第一次导出要联网加载排版库；DOCX 不用联网，下好用 Word 或 WPS 打开就能打印。</p>
 </div>
@@ -915,25 +922,95 @@ function exportDateTxt(){
   var n = new Date();
   return n.getFullYear() + "-" + (n.getMonth()+1) + "-" + n.getDate();
 }
+var pvMode = "fit";
+function pvTitleHTML(sample, total){
+  return "<div style=\"font-size:15px;font-weight:700;margin-bottom:2px\">Twe_dic 错词本" + (sample ? "（样例）" : "") + "</div>"
+    + "<div style=\"font-size:9px;color:#7d90ab;margin-bottom:10px\">共 " + total + " 词 · " + exportDateTxt() + " · " + (exportLayout==="double" ? "双列型" : "单列型") + "</div>"
+    + (sample ? "<div style=\"font-size:9px;color:#7d90ab;margin-bottom:10px\">错词本还是空的，下面拿 abandon 当样例，先看看你选的模板长什么样。</div>" : "");
+}
+function pvEntrySingleHTML(d){
+  var line = entryLineHTML(d);
+  return "<div style=\"margin-bottom:3px;font-size:10.5px;line-height:1.4;overflow-wrap:break-word\">" + (line ? "<div>" + line + "</div>" : "") + (exportSel.ee && d.ee ? "<div style=\"color:#42597a;font-size:10px;line-height:1.35\">" + esc(d.ee) + "</div>" : "") + "</div>";
+}
+function pvCellDoubleHTML(d, padLeft){
+  var ln = entryLineHTML(d);
+  return "<td style=\"width:50%;vertical-align:top;padding:0 8px 4px " + padLeft + "px;font-size:9.5px;line-height:1.35;border-bottom:1px solid #d5e1f0;overflow-wrap:break-word\">" + (ln ? "<div>" + ln + "</div>" : "") + (exportSel.ee && d.ee ? "<div style=\"color:#42597a;font-size:9px;line-height:1.3\">" + esc(d.ee) + "</div>" : "") + "</td>";
+}
+function pvRowDoubleHTML(a, b){
+  var row = "<tr>" + pvCellDoubleHTML(a, 0);
+  row += b ? pvCellDoubleHTML(b, 8) : "<td style=\"width:50%\"></td>";
+  return row + "</tr>";
+}
+/* 按真实 A4 分页：量尺和导出文件同宽 794px、同边距、同字号，超高就换页。
+   预览不再只截前 14/24 个词，也不再用固定高 + overflow:hidden 把底下的词截掉。 */
+function pvPaginate(show, sample, total){
+  var pages = [], cur = [];
+  var m = document.createElement("div");
+  m.style.cssText = "position:absolute;left:-10000px;top:0;width:794px;padding:26px 30px;background:#fff;color:#1a2a44;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;visibility:hidden";
+  document.body.appendChild(m);
+  var PAGE_H = 1123; /* A4 297mm @96dpi */
+  if(exportLayout === "double"){
+    m.innerHTML = pvTitleHTML(sample, total) + "<table style=\"width:100%;border-collapse:collapse;table-layout:fixed\"><tbody></tbody></table>";
+    var tb = m.querySelector("tbody");
+    for(var r = 0; r < show.length; r += 2){
+      var row = pvRowDoubleHTML(show[r], show[r+1] || null);
+      tb.innerHTML += row;
+      if(m.offsetHeight > PAGE_H && cur.length){
+        pages.push(cur); cur = [row];
+        m.innerHTML = "<table style=\"width:100%;border-collapse:collapse;table-layout:fixed\"><tbody>" + row + "</tbody></table>";
+        tb = m.querySelector("tbody");
+      } else {
+        cur.push(row);
+      }
+    }
+  } else {
+    m.innerHTML = pvTitleHTML(sample, total);
+    for(var i = 0; i < show.length; i++){
+      var block = pvEntrySingleHTML(show[i]);
+      m.innerHTML += block;
+      if(m.offsetHeight > PAGE_H && cur.length){
+        pages.push(cur); cur = [block]; m.innerHTML = block;
+      } else {
+        cur.push(block);
+      }
+    }
+  }
+  pages.push(cur);
+  document.body.removeChild(m);
+  return pages;
+}
+function applyPvScale(){
+  var scroll = document.getElementById("pvScroll"), box = document.getElementById("exportPreview");
+  if(!scroll || !box) return;
+  box.style.height = "auto"; box.style.width = "794px";
+  var w = scroll.clientWidth;
+  var scale = pvMode === "zoom" ? 1 : (w > 50 ? Math.min(1, (w - 20) / 794) : 0.45);
+  var h = box.offsetHeight;
+  box.style.transform = "scale(" + scale + ")";
+  box.style.width = (794 * scale) + "px";
+  box.style.height = (h * scale) + "px";
+}
 function renderExportPreview(){
   var box = document.getElementById("exportPreview"); if(!box) return;
   var list = exportEntries();
   var sample = !list.length;
-  var show = sample ? [DATA[0]] : list.slice(0, exportLayout==="double" ? 24 : 14);
-  var html = "<div class=\"pv-title\">Twe_dic 错词本" + (sample ? "（样例）" : "") + "</div>"
-    + "<div class=\"pv-sub\">共 " + (sample ? 0 : list.length) + " 词 · " + exportDateTxt() + " · " + (exportLayout==="double" ? "双列型" : "单列型") + "</div>";
-  if(sample){
-    html += "<div class=\"pv-sub\">错词本还是空的，下面拿 abandon 当样例，先看看你选的模板长什么样。</div>";
+  var show = sample ? [DATA[0]] : list;
+  var pages = pvPaginate(show, sample, sample ? 0 : list.length);
+  var html = "";
+  for(var p = 0; p < pages.length; p++){
+    html += "<div class=\"a4page\">";
+    if(p === 0) html += pvTitleHTML(sample, sample ? 0 : list.length);
+    if(exportLayout === "double"){
+      html += "<table style=\"width:100%;border-collapse:collapse;table-layout:fixed\"><tbody>" + pages[p].join("") + "</tbody></table>";
+    } else {
+      html += pages[p].join("");
+    }
+    html += "</div>";
   }
-  var entriesHtml = "";
-  for(var i=0;i<show.length;i++){
-    var d = show[i];
-    var line = entryLineHTML(d);
-    entriesHtml += "<div class=\"pv-c\">" + (line ? "<div>" + line + "</div>" : "") + (exportSel.ee && d.ee ? "<div class=\"pv-ee\">" + esc(d.ee) + "</div>" : "") + "</div>";
-  }
-  html += "<div class=\"" + (exportLayout==="double" ? "pv-grid-double" : "pv-grid-single") + "\">" + entriesHtml + "</div>";
-  if(!sample && list.length > show.length){ html += "<div class=\"pv-more\">…… 还有 " + (list.length - show.length) + " 个词，导出文件里全都有。</div>"; }
   box.innerHTML = html;
+  var info = document.getElementById("pvInfo");
+  if(info) info.textContent = "共 " + pages.length + " 页 · " + (sample ? "样例 1 词" : list.length + " 个词全都在下面");
+  applyPvScale();
 }
 function sheetHTML(){
   var list = exportEntries();
@@ -1437,6 +1514,9 @@ document.getElementById("exportLayout").addEventListener("click", function(e){
   renderExportPreview();
 });
 document.getElementById("btnExportPdf").addEventListener("click", exportPdf);
+document.getElementById("btnPvFit").addEventListener("click", function(){ pvMode="fit"; document.getElementById("btnPvFit").classList.add("on"); document.getElementById("btnPvZoom").classList.remove("on"); applyPvScale(); });
+document.getElementById("btnPvZoom").addEventListener("click", function(){ pvMode="zoom"; document.getElementById("btnPvZoom").classList.add("on"); document.getElementById("btnPvFit").classList.remove("on"); applyPvScale(); });
+window.addEventListener("resize", function(){ applyPvScale(); });
 document.getElementById("btnExportDocx").addEventListener("click", exportDocx);
 document.getElementById("btnWrongClear").addEventListener("click", function(){ wrong = []; store.set(wrong); renderWrong(); renderList(); });
 document.getElementById("btnWrongExport").addEventListener("click", function(){
